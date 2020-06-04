@@ -51,7 +51,7 @@ const (
 func main() {
 	path, _ := filepath.Abs(os.Args[0])
 	imgDirPath := filepath.Join(filepath.Dir(path), imgDirName)
-	if _, err := os.Stat(imgDirPath); os.IsExist(err) {
+	if _, err := os.Stat(imgDirPath); !os.IsNotExist(err) {
 		checkErr("Init path", errors.New(""), fmt.Sprintf("Old img Path exist:%v", imgDirPath))
 	}
 	os.MkdirAll(imgDirPath, 0755)
@@ -205,6 +205,12 @@ func getsample(p image.Image) (rgb, rgb) {
 	return topSample, bottomSample
 }
 
+const (
+	chessLength    = 210
+	chessWidth     = 100
+	tooCloseOffset = 50 // we use to judge if they are too close or just out of windows
+)
+
 func findNextCenter(imgPathChan chan string, resChan chan pos) {
 	defer func() {
 		resChan <- pos{}
@@ -238,12 +244,16 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 
 		topX, topY := 0, 0
 
+		// wait for find position done
+		chessCoordinate := <-syncChan
+
 	loop:
 		for y := p.Bounds().Min.Y + OffsetOfYToFindTop; y <= p.Bounds().Max.Y; y++ {
 			for x := p.Bounds().Min.X + OffsetOfXToFindTop; x < p.Bounds().Max.X-OffsetOfXToFindTop; x++ {
 				r, g, b := At(p, x, y)
 
-				if !matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) && !match(r, g, b, RChess, GChess, BChess, deviation) {
+				if !matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) &&
+					math.Sqrt(math.Abs(math.Pow(float64(chessCoordinate.X-x), 2)+math.Abs(math.Pow(float64(chessCoordinate.Y-y), 2)))) > chessLength {
 					topX = x
 					topY = y
 					break loop
@@ -294,22 +304,35 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		centerX := (leftX + rightX) / 2
 		centerY := (leftY + rightY) / 2
 
-		// case: block out of range
+		// case: block out of range or block too close
 		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRange {
-			if topX-leftX > rightX-topX {
-				// right point out of range
-				centerX = topX
-				centerY = leftY
+			if leftX-p.Bounds().Min.X < tooCloseOffset || p.Bounds().Max.X-rightX < tooCloseOffset {
+				// out of range
+				if topX-leftX > rightX-topX {
+					// right point out of range
+					centerX = topX
+					centerY = leftY
 
+				} else {
+					// left point out of range
+					centerX = topX
+					centerY = rightY
+				}
 			} else {
-				// left point out of range
-				centerX = topX
-				centerY = rightY
+				// too close
+				if topX-leftX > rightX-topX {
+					// chess in left
+					centerX = topX
+					centerY = rightY
+
+				} else {
+					// chess in right
+					centerX = topX
+					centerY = leftX
+				}
 			}
 		}
 
-		// wait for find position done
-		<-syncChan
 		// open again
 		f, err = os.OpenFile(imgPath, os.O_RDONLY, 0644)
 		if err != nil {
@@ -326,7 +349,6 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		f.Close()
 
 		resChan <- pos{
-
 			X: centerX,
 			Y: centerY,
 		}
@@ -375,7 +397,7 @@ type pos struct {
 	Y int
 }
 
-var syncChan = make(chan struct{}, 0)
+var syncChan = make(chan pos, 0)
 
 func findPos(imgPathChan chan string, resChan chan pos) {
 	defer func() {
@@ -394,11 +416,22 @@ func findPos(imgPathChan chan string, resChan chan pos) {
 		}
 
 		minX, maxX, maxY := p.Bounds().Max.X, 0, 0
-		for x := p.Bounds().Min.X; x <= p.Bounds().Max.X; x++ {
-			for y := p.Bounds().Min.Y; y <= p.Bounds().Max.Y; y++ {
+		beginFindX, endFindX, beginFindY, endFindY := p.Bounds().Min.X, p.Bounds().Max.X, p.Bounds().Min.Y, p.Bounds().Max.Y
+		hadTouchChess := false
+
+		for y := beginFindY; y <= endFindY; y++ {
+			for x := beginFindX; x <= endFindX; x++ {
 				r, g, b := At(p, x, y)
 
 				if match(r, g, b, RChess, GChess, BChess, deviation) {
+					if !hadTouchChess {
+						beginFindX = x - (chessWidth / 2)
+						endFindX = x + (chessWidth / 2)
+						beginFindY = y
+						endFindY = y + chessLength
+						hadTouchChess = true
+					}
+
 					minX = int(math.Min(float64(x), float64(minX)))
 					maxX = int(math.Max(float64(x), float64(maxX)))
 					maxY = int(math.Max(float64(y), float64(maxY)))
@@ -406,16 +439,19 @@ func findPos(imgPathChan chan string, resChan chan pos) {
 			}
 		}
 
-		drawRectangle(imgPath, p, (minX+maxX)/2, maxY)
-		// notify find center can begin draw point
-		syncChan <- struct{}{}
-
-		f.Close()
-
-		resChan <- pos{
+		chessCoordinate := pos{
 			X: (minX + maxX) / 2,
 			Y: maxY,
 		}
+
+		drawRectangle(imgPath, p, chessCoordinate.X, chessCoordinate.Y)
+
+		// notify find center can begin to find center
+		syncChan <- chessCoordinate
+
+		f.Close()
+
+		resChan <- chessCoordinate
 	}
 }
 
