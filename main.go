@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -32,31 +33,28 @@ func checkErr(doing string, err error, args ...interface{}) {
 }
 
 const (
-	imgPathInPhone    = "/sdcard/screenshot.png"
-	imgDirName        = "imgs"
-	myPositionDirName = "myPos"
-	nextCenterDirName = "nextCenter"
+	imgPathInPhone = "/sdcard/screenshot.png"
+	imgDirName     = "imgs"
 )
 
 const (
-	SleepLess   = 200  // sleep at least, wait for skip done
-	SleepRandom = 1000 // random sleep, prevent cheat
-	MillSecond  = 1000 * 1000
+	SleepLess         = 1000 // sleep at least, wait for skip done
+	SleepRandom       = 1000 // random sleep, prevent cheat
+	PressRandomFactor = 2    // random press, prevent cheat
+	MillSecond        = 1000 * 1000
 )
 
 const (
-	JumpRatio = 1.39
+	JumpRatio = 1.363
 )
 
 func main() {
 	path, _ := filepath.Abs(os.Args[0])
 	imgDirPath := filepath.Join(filepath.Dir(path), imgDirName)
-	if _, err := os.Stat(imgDirPath); err == nil {
-		os.Remove(imgDirPath)
+	if _, err := os.Stat(imgDirPath); os.IsExist(err) {
+		checkErr("Init path", errors.New(""), fmt.Sprintf("Old img Path exist:%v", imgDirPath))
 	}
 	os.MkdirAll(imgDirPath, 0755)
-	os.MkdirAll(filepath.Join(imgDirPath, myPositionDirName), 0755)
-	os.MkdirAll(filepath.Join(imgDirPath, nextCenterDirName), 0755)
 
 	configImgPathChan := make(chan string)
 	configResChan := make(chan config)
@@ -104,8 +102,8 @@ func main() {
 		pressTime := jumpRatio * pixelDistance
 
 		// random swipe, prevent cheat
-		pressX := rand.Intn(config.weight / 2)
-		pressY := rand.Intn(config.height / 2)
+		pressX := rand.Intn(config.weight / PressRandomFactor)
+		pressY := rand.Intn(config.height / PressRandomFactor)
 
 		err = exec.Command("adb", "shell", fmt.Sprintf("input swipe %d %d %d %d %d", pressX, pressY, pressX, pressY, int(pressTime))).Run()
 		checkErr("Skip", err, imgPath)
@@ -117,7 +115,7 @@ func main() {
 		lastCenter = nextCenter
 
 		i++
-		if i > 2 {
+		if i > 5000 {
 			break
 		}
 	}
@@ -127,6 +125,7 @@ func adjust(jumpRatio float64, lastpos, lastCenter, nextpos pos) float64 {
 	if lastpos.X == 0 {
 		return jumpRatio
 	}
+
 	return jumpRatio
 	expect := math.Sqrt(math.Abs(math.Pow(float64(lastCenter.X-lastpos.X), 2)) + math.Abs(math.Pow(float64(lastCenter.Y-lastpos.Y), 2)))
 	really := math.Sqrt(math.Abs(math.Pow(float64(nextpos.X-lastpos.X), 2)) + math.Abs(math.Pow(float64(nextpos.Y-lastpos.Y), 2)))
@@ -139,6 +138,71 @@ func adjust(jumpRatio float64, lastpos, lastCenter, nextpos pos) float64 {
 	// slowly
 	jumpRatio += (expectJumpRatio - jumpRatio) / 3
 	return jumpRatio
+}
+
+const (
+	OffsetOfYToFindTop    = 500 // avoid touching scores
+	OffsetOfXToFindTop    = 10
+	OffsetOfXToFindCenter = 400 // find center in range[topX - OffsetOfXToFindCenter, topX + OffsetOfXToFindCenter]
+	OffsetOfYToFindCenter = 300 // find center in range[topY, topY + OffsetOfYToFindCenter]
+	BlockOutOfRange       = 50  // we think either left or right point is out of window
+)
+
+type rgb struct {
+	r uint32
+	g uint32
+	b uint32
+}
+
+const (
+	sampleTopOffset    = 200 // sample point offset
+	sampleBottomOffSet = 500
+)
+
+type topbottom struct {
+	top    rgb
+	bottom rgb
+}
+type colorType map[rgb]topbottom
+
+var colorModel = colorType{}
+
+func getsample(p image.Image) (rgb, rgb) {
+	colorToOccurence := make(map[rgb]int)
+	var topSample rgb
+	var bottomSample rgb
+
+	// gradient background
+	// Upper corner target color
+	topSample.r, topSample.g, topSample.b = At(p, 0, sampleTopOffset)
+
+	if v, isfound := colorModel[topSample]; isfound {
+		return v.top, v.bottom
+	}
+
+	log.Println("Wrong:unknown color")
+
+	var color rgb
+	for i := 0; i < p.Bounds().Max.X; i++ {
+		color.r, color.g, color.b = At(p, i, p.Bounds().Max.Y-sampleBottomOffSet)
+		colorToOccurence[color]++
+	}
+	log.Printf("NewColor: %v", topSample)
+
+	maxOccurence := 0
+	for k, v := range colorToOccurence {
+		if v > maxOccurence {
+			maxOccurence = v
+			bottomSample = k
+		}
+	}
+
+	colorModel[topSample] = topbottom{
+		top:    topSample,
+		bottom: bottomSample,
+	}
+
+	return topSample, bottomSample
 }
 
 func findNextCenter(imgPathChan chan string, resChan chan pos) {
@@ -157,34 +221,29 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 			return
 		}
 
-		// 渐变色背景，多点采样
-		// 左下角
-		bltr, bltg, bltb := At(p, 200, 100)
-		// 右下角
-		brtr, brtg, brtb := At(p, 900, 2000)
+		// get sample
+		topSample, bottomSample := getsample(p)
 
-		minr := uint32(math.Min(float64(bltr), float64(brtr)))
-		maxr := uint32(math.Max(float64(bltr), float64(brtr)))
+		utr, utg, utb := topSample.r, topSample.g, topSample.b
+		ltr, ltg, ltb := bottomSample.r, bottomSample.g, bottomSample.b
 
-		ming := uint32(math.Min(float64(bltg), float64(brtg)))
-		maxg := uint32(math.Max(float64(bltg), float64(brtg)))
+		minr := uint32(math.Min(float64(utr), float64(ltr)))
+		maxr := uint32(math.Max(float64(utr), float64(ltr)))
 
-		minb := uint32(math.Min(float64(bltb), float64(brtb)))
-		maxb := uint32(math.Max(float64(bltb), float64(brtb)))
+		ming := uint32(math.Min(float64(utg), float64(ltg)))
+		maxg := uint32(math.Max(float64(utg), float64(ltg)))
 
-		fmt.Println(bltr, brtg, brtb)
-		fmt.Println(brtr, bltg, bltb)
+		minb := uint32(math.Min(float64(utb), float64(ltb)))
+		maxb := uint32(math.Max(float64(utb), float64(ltb)))
 
 		topX, topY := 0, 0
 
 	loop:
-		// prevent touch button on right top
-		for y := 300; y <= p.Bounds().Max.Y-200; y++ {
-			// prevent touch number in left top and search range
-			for x := p.Bounds().Min.X + 300; x <= 7*p.Bounds().Max.X/8; x++ {
+		for y := p.Bounds().Min.Y + OffsetOfYToFindTop; y <= p.Bounds().Max.Y; y++ {
+			for x := p.Bounds().Min.X + OffsetOfXToFindTop; x < p.Bounds().Max.X-OffsetOfXToFindTop; x++ {
 				r, g, b := At(p, x, y)
 
-				if !matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb, 16) {
+				if !matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) && !match(r, g, b, RChess, GChess, BChess, deviation) {
 					topX = x
 					topY = y
 					break loop
@@ -192,35 +251,84 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 			}
 		}
 
-		rightX, rightY := topX, topY
+		leftX, rightX, leftY, rightY := p.Bounds().Max.X, 0, 0, 0
 
 		ntr, ntg, ntb := At(p, topX, topY)
 
-	loop2:
-		for y := rightY + 30; y <= p.Bounds().Max.Y-200; y++ {
-			for x := rightX; x <= 7*p.Bounds().Max.X/8; x++ {
+		// search right
+		for y := topY; y <= topY+OffsetOfYToFindCenter; y++ {
+			for x := topX; x <= topX+OffsetOfXToFindCenter; x++ {
 				r, g, b := At(p, x, y)
 
-				if !match(r, g, b, ntr, ntg, ntb, 16) {
-					if x >= rightX {
+				if matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+					break
+				}
+
+				if match(r, g, b, ntr, ntg, ntb, deviation) {
+					if x > rightX {
 						rightX = x
 						rightY = y
-						break
-					} else {
-						break loop2
 					}
-
 				}
 			}
 		}
 
-		drawRectangle(filepath.Join(filepath.Dir(imgPath), nextCenterDirName, filepath.Base(imgPath)), p, topX, topY, rightX, rightY, topX, rightY)
+		// search left
+		for y := topY; y <= topY+OffsetOfYToFindCenter; y++ {
+			for x := topX; x >= topX-OffsetOfXToFindCenter; x-- {
+				r, g, b := At(p, x, y)
+
+				if matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+					break
+				}
+
+				if match(r, g, b, ntr, ntg, ntb, deviation) {
+					if x < leftX {
+						leftX = x
+						leftY = y
+					}
+				}
+			}
+		}
+
+		centerX := (leftX + rightX) / 2
+		centerY := (leftY + rightY) / 2
+
+		// case: block out of range
+		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRange {
+			if topX-leftX > rightX-topX {
+				// right point out of range
+				centerX = topX
+				centerY = leftY
+
+			} else {
+				// left point out of range
+				centerX = topX
+				centerY = rightY
+			}
+		}
+
+		// wait for find position done
+		<-syncChan
+		// open again
+		f, err = os.OpenFile(imgPath, os.O_RDONLY, 0644)
+		if err != nil {
+			return
+		}
+
+		p, err = png.Decode(f)
+		if err != nil {
+			return
+		}
+
+		drawRectangle(imgPath, p, topX, topY, leftX, leftY, rightX, rightY, centerX, centerY)
 
 		f.Close()
 
 		resChan <- pos{
-			X: topX,
-			Y: rightY,
+
+			X: centerX,
+			Y: centerY,
 		}
 	}
 }
@@ -267,6 +375,8 @@ type pos struct {
 	Y int
 }
 
+var syncChan = make(chan struct{}, 0)
+
 func findPos(imgPathChan chan string, resChan chan pos) {
 	defer func() {
 		resChan <- pos{}
@@ -288,7 +398,7 @@ func findPos(imgPathChan chan string, resChan chan pos) {
 			for y := p.Bounds().Min.Y; y <= p.Bounds().Max.Y; y++ {
 				r, g, b := At(p, x, y)
 
-				if match(r, g, b, RChess, GChess, BChess, 16) {
+				if match(r, g, b, RChess, GChess, BChess, deviation) {
 					minX = int(math.Min(float64(x), float64(minX)))
 					maxX = int(math.Max(float64(x), float64(maxX)))
 					maxY = int(math.Max(float64(y), float64(maxY)))
@@ -296,7 +406,9 @@ func findPos(imgPathChan chan string, resChan chan pos) {
 			}
 		}
 
-		drawRectangle(filepath.Join(filepath.Dir(imgPath), myPositionDirName, filepath.Base(imgPath)), p, (minX+maxX)/2, maxY)
+		drawRectangle(imgPath, p, (minX+maxX)/2, maxY)
+		// notify find center can begin draw point
+		syncChan <- struct{}{}
 
 		f.Close()
 
@@ -315,6 +427,10 @@ func At(p image.Image, x int, y int) (uint32, uint32, uint32) {
 	return r, g, b
 }
 
+const (
+	deviation = 16
+)
+
 func match(r, g, b, tr, tg, tb, t uint32) bool {
 	if r > tr-t && r < tr+t && g > tg-t && g < tg+t && b > tb-t && b < tb+t {
 		return true
@@ -323,8 +439,8 @@ func match(r, g, b, tr, tg, tb, t uint32) bool {
 	return false
 }
 
-func matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb, t uint32) bool {
-	if r > minr-t && r < maxr+t && g > ming-t && g < maxg+t && b > minb-t && b < maxb+t {
+func matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb uint32) bool {
+	if r >= minr && r <= maxr && g >= ming && g <= maxg && b >= minb && b <= maxb {
 		return true
 	}
 
@@ -351,5 +467,6 @@ func drawRectangle(imgPath string, p image.Image, pos ...int) {
 	}
 
 	png.Encode(myfile, myimage)
+	myfile.Sync()
 	myfile.Close()
 }
