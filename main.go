@@ -2,7 +2,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -38,7 +37,7 @@ const (
 )
 
 const (
-	SleepLess         = 1000 // sleep at least, wait for skip done
+	SleepLess         = 1500 // sleep at least, wait for skip done
 	SleepRandom       = 1000 // random sleep, prevent cheat
 	PressRandomFactor = 2    // random press, prevent cheat
 	MillSecond        = 1000 * 1000
@@ -52,7 +51,7 @@ func main() {
 	path, _ := filepath.Abs(os.Args[0])
 	imgDirPath := filepath.Join(filepath.Dir(path), imgDirName)
 	if _, err := os.Stat(imgDirPath); !os.IsNotExist(err) {
-		checkErr("Init path", errors.New(""), fmt.Sprintf("Old img Path exist:%v", imgDirPath))
+		// checkErr("Init path", errors.New(""), fmt.Sprintf("Old img Path exist:%v", imgDirPath))
 	}
 	os.MkdirAll(imgDirPath, 0755)
 
@@ -140,14 +139,6 @@ func adjust(jumpRatio float64, lastpos, lastCenter, nextpos pos) float64 {
 	return jumpRatio
 }
 
-const (
-	OffsetOfYToFindTop    = 500 // avoid touching scores
-	OffsetOfXToFindTop    = 10
-	OffsetOfXToFindCenter = 400 // find center in range[topX - OffsetOfXToFindCenter, topX + OffsetOfXToFindCenter]
-	OffsetOfYToFindCenter = 300 // find center in range[topY, topY + OffsetOfYToFindCenter]
-	BlockOutOfRange       = 50  // we think either left or right point is out of window
-)
-
 type rgb struct {
 	r uint32
 	g uint32
@@ -206,9 +197,18 @@ func getsample(p image.Image) (rgb, rgb) {
 }
 
 const (
-	chessLength    = 210
-	chessWidth     = 100
-	tooCloseOffset = 50 // we use to judge if they are too close or just out of windows
+	chessLength          = 210
+	chessWidth           = 100
+	tooCloseOffset       = 50 // we use to judge if they are too close or just out of windows
+	BlockOutOfRange      = 30 // we think either left or right point is out of window
+	outChessBoardYOffset = 20
+)
+
+const (
+	OffsetOfYToFindTop    = 500 // avoid touching scores
+	OffsetOfXToFindTop    = 10
+	OffsetOfXToFindCenter = 400 // find center in range[topX - OffsetOfXToFindCenter, topX + OffsetOfXToFindCenter]
+	OffsetOfYToFindCenter = 300 // find center in range[topY, topY + OffsetOfYToFindCenter]
 )
 
 func findNextCenter(imgPathChan chan string, resChan chan pos) {
@@ -266,7 +266,15 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		ntr, ntg, ntb := At(p, topX, topY)
 
 		// search right
+	loop2:
 		for y := topY; y <= topY+OffsetOfYToFindCenter; y++ {
+			// in the background
+			if r, g, b := At(p, topX, y); matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+				if r, g, b := At(p, topX, y+outChessBoardYOffset); matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+					break loop2
+				}
+			}
+
 			for x := topX; x <= topX+OffsetOfXToFindCenter; x++ {
 				r, g, b := At(p, x, y)
 
@@ -284,7 +292,14 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		}
 
 		// search left
+	loop3:
 		for y := topY; y <= topY+OffsetOfYToFindCenter; y++ {
+			if r, g, b := At(p, topX, y); matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+				if r, g, b := At(p, topX, y+outChessBoardYOffset); matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) {
+					break loop3
+				}
+			}
+
 			for x := topX; x >= topX-OffsetOfXToFindCenter; x-- {
 				r, g, b := At(p, x, y)
 
@@ -305,7 +320,8 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		centerY := (leftY + rightY) / 2
 
 		// case: block out of range or block too close
-		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRange {
+		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRange ||
+			math.Abs(float64(leftY-rightY)) > BlockOutOfRange {
 			if leftX-p.Bounds().Min.X < tooCloseOffset || p.Bounds().Max.X-rightX < tooCloseOffset {
 				// out of range
 				if topX-leftX > rightX-topX {
@@ -328,7 +344,7 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 				} else {
 					// chess in right
 					centerX = topX
-					centerY = leftX
+					centerY = leftY
 				}
 			}
 		}
