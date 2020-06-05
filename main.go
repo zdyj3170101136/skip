@@ -200,7 +200,8 @@ const (
 	chessLength          = 210
 	chessWidth           = 100
 	tooCloseOffset       = 50 // we use to judge if they are too close or just out of windows
-	BlockOutOfRange      = 30 // we think either left or right point is out of window
+	BlockOutOfRangeX     = 40 // we think either left or right point is out of window
+	BlockOutOfRangeY     = 20 // we think either left or right point is out of window
 	outChessBoardYOffset = 20
 )
 
@@ -253,7 +254,8 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 				r, g, b := At(p, x, y)
 
 				if !matchShading(r, g, b, minr, ming, minb, maxr, maxg, maxb) &&
-					math.Sqrt(math.Abs(math.Pow(float64(chessCoordinate.X-x), 2)+math.Abs(math.Pow(float64(chessCoordinate.Y-y), 2)))) > chessLength {
+					!(math.Abs(float64(chessCoordinate.X-x)) < (chessWidth/2) &&
+						math.Abs(float64(chessCoordinate.Y-y)) < chessLength) {
 					topX = x
 					topY = y
 					break loop
@@ -320,8 +322,8 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 		centerY := (leftY + rightY) / 2
 
 		// case: block out of range or block too close
-		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRange ||
-			math.Abs(float64(leftY-rightY)) > BlockOutOfRange {
+		if math.Abs(float64(topX-leftX)-float64(rightX-topX)) > BlockOutOfRangeX ||
+			math.Abs(float64(leftY-rightY)) > BlockOutOfRangeY {
 			if leftX-p.Bounds().Min.X < tooCloseOffset || p.Bounds().Max.X-rightX < tooCloseOffset {
 				// out of range
 				if topX-leftX > rightX-topX {
@@ -349,6 +351,11 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 			}
 		}
 
+		if x, y := SpecialBlockWithRes(p, topX, topY); !(x == 0 && y == 0) {
+			centerX = x
+			centerY = y
+		}
+
 		// open again
 		f, err = os.OpenFile(imgPath, os.O_RDONLY, 0644)
 		if err != nil {
@@ -369,6 +376,24 @@ func findNextCenter(imgPathChan chan string, resChan chan pos) {
 			Y: centerY,
 		}
 	}
+}
+
+const (
+	SpecialBlockSampleOne = 135
+	SpecialBlockSampleTwo = 180
+	SpecialBlockYOffset   = 30
+	SpecialBlockXOffset   = 5
+)
+
+// return 0, 0 if not found special block
+func SpecialBlockWithRes(p image.Image, x, y int) (int, int) {
+	if r, g, b := At(p, x, y+SpecialBlockSampleOne); 94 <= r && r <= 107 && 126 <= g && g <= 143 && 154 <= b && b <= 175 {
+		if r, g, b := At(p, x, y+SpecialBlockSampleTwo); 94 <= r && r <= 107 && 126 <= g && g <= 143 && 154 <= b && b <= 175 {
+			log.Print("Wrong: Special Block")
+			return x + SpecialBlockXOffset, y + SpecialBlockYOffset
+		}
+	}
+	return 0, 0
 }
 
 type config struct {
